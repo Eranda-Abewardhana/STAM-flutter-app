@@ -1,0 +1,48 @@
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'user_model.dart';
+
+// **************************************************************************
+// JsonSerializableGenerator
+// **************************************************************************
+
+User _$UserFromJson(Map<String, dynamic> json) => User(
+      id: json['id'] as String,
+      firstName: json['firstName'] as String,
+      lastName: json['lastName'] as String,
+      email: json['email'] as String,
+      phone: json['phone'] as String?,
+      profileImage: json['profileImage'] as String?,
+      fcmToken: json['fcmToken'] as String?,
+      notificationsEnabled: json['notificationsEnabled'] as bool? ?? true,
+      emailNotifications: json['emailNotifications'] as bool? ?? true,
+      smartwatchConnected: json['smartwatchConnected'] as bool? ?? false,
+      preferredAirline: json['preferredAirline'] as String?,
+      frequentAirports: (json['frequentAirports'] as List<dynamic>?)
+              ?.map((e) => e as String)
+              .toList() ??
+          const [],
+      createdAt: json['createdAt'] == null
+          ? null
+          : DateTime.parse(json['createdAt'] as String),
+      updatedAt: json['updatedAt'] == null
+          ? null
+          : DateTime.parse(json['updatedAt'] as String),
+    );
+
+Map<String, dynamic> _$UserToJson(User instance) => <String, dynamic>{
+      'id': instance.id,
+      'firstName': instance.firstName,
+      'lastName': instance.lastName,
+      'email': instance.email,
+      'phone': instance.phone,
+      'profileImage': instance.profileImage,
+      'fcmToken': instance.fcmToken,
+      'notificationsEnabled': instance.notificationsEnabled,
+      'emailNotifications': instance.emailNotifications,
+      'smartwatchConnected': instance.smartwatchConnected,
+      'preferredAirline': instance.preferredAirline,
+      'frequentAirports': instance.frequentAirports,
+      'createdAt': instance.createdAt?.toIso8601String(),
+      'updatedAt': instance.updatedAt?.toIso8601String(),
+    };
