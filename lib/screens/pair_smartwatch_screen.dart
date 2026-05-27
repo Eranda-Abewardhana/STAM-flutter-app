@@ -1,23 +1,14 @@
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
-import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:permission_handler/permission_handler.dart';
-import 'package:smart_passenger_alert/models/sensor_model.dart';
 import 'package:smart_passenger_alert/providers/app_providers.dart';
-import 'package:smart_passenger_alert/services/sleep_api_service.dart';
 import 'package:smart_passenger_alert/services/smartwatch_service.dart';
-import 'package:smart_passenger_alert/theme/theme.dart';
-import 'package:smart_passenger_alert/widgets/glass_morphism_container.dart';
 
 class PairSmartwatchScreen extends ConsumerStatefulWidget {
   final String userId;
-
-  const PairSmartwatchScreen({
-    Key? key,
-    required this.userId,
-  }) : super(key: key);
+  const PairSmartwatchScreen({Key? key, required this.userId}) : super(key: key);
 
   @override
   ConsumerState<PairSmartwatchScreen> createState() => _PairSmartwatchScreenState();
@@ -30,74 +21,23 @@ class _PairSmartwatchScreenState extends ConsumerState<PairSmartwatchScreen> {
   List<BleWatchDevice> _foundDevices = [];
   String? _lastPairedId;
   String? _connectingDeviceId;
-  
-  final SleepApiService _sleepApi = SleepApiService();
-  SleepPrediction? _sleepPrediction;
-  bool _isApiLoading = false;
-  
-  StreamSubscription? _scanSubscription;
-  StreamSubscription<SensorData>? _sensorSubscription;
 
   @override
   void initState() {
     super.initState();
     _initializeConnection();
-    _setupSensorListener();
-  }
-
-  void _setupSensorListener() {
-    _sensorSubscription = ref.read(smartwatchServiceProvider).sensorDataStream.listen((data) {
-      if (!mounted) return;
-      if (data.userId == widget.userId && !_isApiLoading && (data.heartRate > 0 || data.movement > 0)) {
-        _updateSleepPrediction(data);
-      }
-    });
   }
 
   Future<void> _initializeConnection() async {
     final service = ref.read(smartwatchServiceProvider);
     _lastPairedId = await service.getLastConnectedDeviceId();
-    
-    // Check system-connected devices first
-    final connected = await FlutterBluePlus.connectedSystemDevices;
-    bool alreadyConnected = false;
-    for (var d in connected) {
-      if (d.remoteId.str == _lastPairedId) {
-        await service.connectToSmartwatch(userId: widget.userId, deviceId: d.remoteId.str);
-        alreadyConnected = true;
-        break;
-      }
-    }
-
-    if (!alreadyConnected && mounted) {
-      _startScan();
-    }
-    if (mounted) setState(() {});
-  }
-
-  @override
-  void dispose() {
-    _scanSubscription?.cancel();
-    _sensorSubscription?.cancel();
-    _countdownTimer?.cancel();
-    FlutterBluePlus.stopScan();
-    super.dispose();
+    _startScan();
   }
 
   Future<void> _startScan() async {
     final service = ref.read(smartwatchServiceProvider);
-    
-    // Re-request permissions every time scan starts
-    final granted = await service.requestPermissions();
-    if (!granted) {
-      _showPermissionDialog();
-      return;
-    }
-
+    if (!await service.requestPermissions()) return;
     if (!await service.ensureBluetoothOn()) return;
-    
-    // 500ms delay after adapter check
-    await Future.delayed(const Duration(milliseconds: 500));
 
     setState(() {
       _isScanning = true;
@@ -106,472 +46,271 @@ class _PairSmartwatchScreenState extends ConsumerState<PairSmartwatchScreen> {
     });
 
     _countdownTimer?.cancel();
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) {
-        timer.cancel();
-        return;
-      }
-      if (_scanCountdown > 0) {
-        setState(() => _scanCountdown--);
-      } else {
-        timer.cancel();
-      }
-    });
-
-    _scanSubscription?.cancel();
-    _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
-      if (!mounted) return;
-      setState(() {
-        for (final r in results) {
-          final idx = _foundDevices.indexWhere((d) => d.id == r.device.remoteId.str);
-          
-          String name = r.advertisementData.advName.trim();
-          if (name.isEmpty) name = r.device.platformName.trim();
-          if (name.isEmpty) name = 'Unknown Device';
-
-          final device = BleWatchDevice(
-            id: r.device.remoteId.str,
-            name: name,
-            rssi: r.rssi,
-            connectable: r.advertisementData.connectable,
-          );
-
-          if (idx != -1) {
-            _foundDevices[idx] = device;
-          } else {
-            _foundDevices.add(device);
-          }
-        }
-      });
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (mounted && _scanCountdown > 0) setState(() => _scanCountdown--);
+      else t.cancel();
     });
 
     try {
-      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 10));
-      // Replace Completer with direct await pattern
-      await FlutterBluePlus.isScanning.where((s) => s == false).first;
-    } catch (e) {
-      debugPrint('Scan error: $e');
+      final results = await service.scanForDevices(timeout: const Duration(seconds: 10));
+      if (mounted) setState(() => _foundDevices = results);
     } finally {
-      if (mounted) {
-        setState(() {
-          _isScanning = false;
-          _countdownTimer?.cancel();
-        });
-      }
+      if (mounted) setState(() => _isScanning = false);
     }
-  }
-
-  void _showPermissionDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Permissions Required'),
-        content: const Text('Bluetooth and Location permissions are needed to scan for devices.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () {
-              openAppSettings();
-              Navigator.pop(context);
-            },
-            child: const Text('Open Settings'),
-          ),
-        ],
-      ),
-    );
   }
 
   Future<void> _connect(String deviceId) async {
     setState(() => _connectingDeviceId = deviceId);
-    try {
-      await ref.read(smartwatchServiceProvider).connectToSmartwatch(
-        userId: widget.userId,
-        deviceId: deviceId,
-      );
-      if (mounted) {
-        setState(() {
-          _lastPairedId = deviceId;
-        });
-      }
-    } catch (e) {
-      debugPrint('Connection error: $e');
-    } finally {
-      if (mounted) setState(() => _connectingDeviceId = null);
-    }
+    await ref.read(smartwatchServiceProvider).connectToSmartwatch(userId: widget.userId, deviceId: deviceId);
+    if (mounted) setState(() => _connectingDeviceId = null);
   }
 
   @override
   Widget build(BuildContext context) {
-    final service = ref.watch(smartwatchServiceProvider);
-    final isConnected = service.isConnected;
+    final isConnected = ref.watch(smartwatchConnectedProvider);
 
     return Scaffold(
-      backgroundColor: AppColors.bgDark,
+      backgroundColor: const Color(0xFF0A0B10),
       appBar: AppBar(
-        title: const Text('Pair Device'),
+        title: const Text('Pair Device', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18, color: Colors.white)),
+        backgroundColor: Colors.transparent,
+        elevation: 0,
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pop(),
+          icon: const Icon(Icons.arrow_back_ios_new, size: 20, color: Colors.white70),
+          onPressed: () => Navigator.pop(context),
         ),
       ),
       body: Column(
         children: [
           Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // [1] LAST PAIRED ROW
-                  if (_lastPairedId != null) _buildLastPairedRow(),
-                  const SizedBox(height: 24),
-                  
-                  // [2] SCAN STATUS ROW
-                  _buildScanStatusRow(),
-                  const SizedBox(height: 12),
-                  
-                  // [3] DEVICE LIST
-                  if (_foundDevices.isEmpty && !_isScanning)
-                    _buildEmptyState()
-                  else
-                    ..._foundDevices.map((d) => _buildDeviceTile(d)).toList(),
-                ],
-              ),
-            ),
-          ),
-          
-          // [5] LIVE DATA PANEL
-          if (isConnected) _buildLiveDataPanel(),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildLastPairedRow() {
-    final lastChars = _lastPairedId!.length > 6 
-        ? _lastPairedId!.substring(_lastPairedId!.length - 6) 
-        : _lastPairedId!;
-        
-    return GlassMorphismContainer(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          const Icon(Icons.access_time, color: AppColors.primary), // Clock icon
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            child: ListView(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
               children: [
-                Text(
-                  'Last paired: $lastChars',
-                  style: const TextStyle(fontWeight: FontWeight.w600),
-                ),
-                Text(
-                  _lastPairedId!,
-                  style: const TextStyle(color: AppColors.textTertiary, fontSize: 10),
-                ),
+                if (_lastPairedId != null) _buildLastPairedTile(),
+                const SizedBox(height: 30),
+                _buildSectionHeader('AVAILABLE DEVICES'),
+                const SizedBox(height: 15),
+                if (_foundDevices.isEmpty && !_isScanning)
+                  _buildNoDevicesFound()
+                else
+                  ..._foundDevices.map((d) => _buildDeviceCard(d, isConnected)),
               ],
             ),
           ),
-          ElevatedButton(
-            onPressed: _connectingDeviceId != null ? null : () => _connect(_lastPairedId!),
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 0),
-              backgroundColor: AppColors.primary.withOpacity(0.1),
-              foregroundColor: AppColors.primary,
-            ),
-            child: const Text('Reconnect', style: TextStyle(fontSize: 12)),
-          ),
+          if (isConnected) _buildLiveStatusPanel(),
         ],
       ),
     );
   }
 
-  Widget _buildScanStatusRow() {
+  Widget _buildSectionHeader(String title) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
+        Text(title, style: TextStyle(color: Colors.white.withOpacity(0.3), fontSize: 11, fontWeight: FontWeight.bold, letterSpacing: 1.2)),
         if (_isScanning)
-          Row(
-            children: [
-              const SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primary),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                'Scanning... ${_scanCountdown}s remaining',
-                style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
-              ),
-            ],
-          )
+          const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFE8304A)))
         else
-          Text(
-            'Available Devices (${_foundDevices.length})',
-            style: const TextStyle(color: AppColors.textSecondary, fontSize: 13, fontWeight: FontWeight.bold),
-          ),
-        
-        if (!_isScanning)
           IconButton(
-            icon: const Icon(Icons.refresh, size: 20, color: AppColors.primary),
+            icon: const Icon(Icons.refresh, size: 18, color: Color(0xFFE8304A)),
             onPressed: _startScan,
-            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(),
           ),
       ],
     );
   }
 
-  Widget _buildDeviceTile(BleWatchDevice device) {
-    final isLinked = device.id == _lastPairedId;
-    final isConnecting = _connectingDeviceId == device.id;
-    final service = ref.read(smartwatchServiceProvider);
-    final isCurrentlyConnected = service.activeDevice?.remoteId.str == device.id && service.isConnected;
-
-    return GlassMorphismContainer(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(12),
+  Widget _buildLastPairedTile() {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: const Color(0xFF161B22), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05))),
       child: Row(
         children: [
-          _buildRssiIcon(device.rssi),
-          const SizedBox(width: 12),
+          const Icon(Icons.history, color: Color(0xFFE8304A), size: 22),
+          const SizedBox(width: 15),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Last paired: :${_lastPairedId!.substring(max(0, _lastPairedId!.length - 5))}', style: const TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.w500)),
+                Text(_lastPairedId!, style: TextStyle(color: Colors.white.withOpacity(0.2), fontSize: 10)),
+              ],
+            ),
+          ),
+          ElevatedButton(
+            onPressed: () => _connect(_lastPairedId!),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF21262D),
+              foregroundColor: const Color(0xFFE8304A),
+              elevation: 0,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            child: const Text('Reconnect', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDeviceCard(BleWatchDevice device, bool isConnected) {
+    final bool isActive = isConnected && ref.read(smartwatchServiceProvider).activeDevice?.remoteId.str == device.id;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: const Color(0xFF161B22), borderRadius: BorderRadius.circular(16), border: Border.all(color: Colors.white.withOpacity(0.05))),
+      child: Row(
+        children: [
+          const Icon(Icons.wifi_tethering, color: Colors.blueAccent, size: 24),
+          const SizedBox(width: 16),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Row(
                   children: [
-                    Text(device.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                    if (isLinked)
-                      Container(
-                        margin: const EdgeInsets.only(left: 8),
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(color: Colors.green.withOpacity(0.2), borderRadius: BorderRadius.circular(4)),
-                        child: const Text('Linked', style: TextStyle(color: Colors.green, fontSize: 10, fontWeight: FontWeight.bold)),
-                      ),
-                    if (isCurrentlyConnected)
-                      Container(
-                        margin: const EdgeInsets.only(left: 8),
-                        width: 8, height: 8,
-                        decoration: const BoxDecoration(color: Colors.green, shape: BoxShape.circle),
-                      ),
+                    Text(device.name, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.white)),
+                    if (isActive) const Padding(padding: EdgeInsets.only(left: 8), child: Icon(Icons.circle, color: Colors.green, size: 8)),
                   ],
                 ),
-                Text(device.id, style: const TextStyle(color: AppColors.textTertiary, fontSize: 12)),
+                Text(device.id, style: TextStyle(color: Colors.white.withOpacity(0.2), fontSize: 11)),
               ],
             ),
           ),
-          if (isConnecting)
-            const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-          else if (!isCurrentlyConnected)
-            ElevatedButton(
+          if (isActive) const Text('Connected', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold, fontSize: 12))
+          else ElevatedButton(
               onPressed: _connectingDeviceId != null ? null : () => _connect(device.id),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                backgroundColor: isLinked ? AppColors.primary : AppColors.bgCardLight,
-              ),
-              child: const Text('Connect', style: TextStyle(fontSize: 12)),
-            )
-          else
-            const Text('Connected', style: TextStyle(color: Colors.green, fontWeight: FontWeight.bold, fontSize: 12)),
+              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFE8304A), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10))),
+              child: _connectingDeviceId == device.id ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Text('Pair', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+            ),
         ],
       ),
     );
   }
 
-  Widget _buildRssiIcon(int rssi) {
-    IconData icon;
-    if (rssi > -60) icon = Icons.signal_wifi_4_bar;
-    else if (rssi > -70) icon = Icons.network_wifi_3_bar;
-    else if (rssi > -80) icon = Icons.network_wifi_2_bar;
-    else icon = Icons.network_wifi_1_bar;
-    
-    return Icon(icon, color: _getRssiColor(rssi), size: 18);
-  }
-
-  Color _getRssiColor(int rssi) {
-    if (rssi > -60) return Colors.green;
-    if (rssi > -80) return Colors.orange;
-    return Colors.red;
-  }
-
-  Widget _buildEmptyState() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 40),
-        child: Column(
-          children: [
-            const Icon(Icons.bluetooth_disabled, size: 64, color: AppColors.textDisabled),
-            const SizedBox(height: 16),
-            const Text('No devices found', style: TextStyle(color: AppColors.textSecondary, fontSize: 16)),
-            const SizedBox(height: 8),
-            const Text('Make sure ESP32 is powered on and nearby', style: TextStyle(color: AppColors.textTertiary, fontSize: 12), textAlign: TextAlign.center),
-            const SizedBox(height: 24),
-            ElevatedButton(
-              onPressed: _isScanning ? null : _startScan,
-              child: _isScanning 
-                ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                : const Text('Scan Again'),
-            ),
-          ],
-        ),
-      ),
+  Widget _buildNoDevicesFound() {
+    return Column(
+      children: [
+        const SizedBox(height: 40),
+        Icon(Icons.bluetooth_searching, size: 40, color: Colors.white.withOpacity(0.1)),
+        const SizedBox(height: 16),
+        const Text('No devices found nearby', style: TextStyle(color: Colors.white24, fontSize: 13)),
+      ],
     );
   }
 
-  Widget _buildLiveDataPanel() {
-    return StreamBuilder<SensorData>(
-      stream: ref.read(smartwatchServiceProvider).sensorDataStream,
-      builder: (context, snapshot) {
-        final data = snapshot.data;
-        if (data == null) return const SizedBox.shrink();
+  Widget _buildLiveStatusPanel() {
+    final esp32Data = ref.watch(esp32HealthDataProvider).value;
+    final prediction = ref.watch(esp32PredictionProvider).value ?? "UNKNOWN|0.0|0";
+    final parts = prediction.split('|');
+    final status = parts[0];
+    final conf = parts.length > 1 ? (double.tryParse(parts[1]) ?? 0.0) : 0.0;
 
-        return Container(
-          decoration: const BoxDecoration(
-            color: AppColors.bgGlass,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-            boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 10, spreadRadius: 2)],
-          ),
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+    return Container(
+      padding: const EdgeInsets.fromLTRB(24, 28, 24, 40),
+      decoration: BoxDecoration(
+        color: const Color(0xFF111111),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
+        boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.6), blurRadius: 40, offset: const Offset(0, -10))],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
             children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              const Icon(Icons.circle, color: Colors.green, size: 10),
+              const SizedBox(width: 12),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.circle, color: Colors.green, size: 12),
-                      const SizedBox(width: 8),
-                      Text(
-                        ref.read(smartwatchServiceProvider).activeDevice?.platformName ?? 'ESP32-HealthSensor',
-                        style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white70),
-                      ),
-                    ],
+                  RichText(
+                    text: const TextSpan(
+                      children: [
+                        TextSpan(text: 'ESP32-HealthSensor ', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white)),
+                        TextSpan(text: 'JAvi', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Color(0xFFE8304A))),
+                      ],
+                    ),
                   ),
-                  const Text('Connected', style: TextStyle(color: Colors.green, fontSize: 12, fontWeight: FontWeight.bold)),
+                  const Text(
+                    'Realtime Monitoring Active',
+                    style: TextStyle(fontSize: 10, color: Colors.white38, fontWeight: FontWeight.w500),
+                  ),
                 ],
               ),
-              const Divider(height: 32, color: Colors.white10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _buildMetric('BPM', data.heartRate.toInt().toString(), Colors.green),
-                  _buildMetric('Movement', '${data.movement.toStringAsFixed(1)} m/s²', AppColors.primary),
-                  _buildSleepStatusBadge(),
-                ],
-              ),
-              const SizedBox(height: 20),
-              _buildAxisData(data),
-              const SizedBox(height: 16),
-              _buildAiPredictionRow(),
+              const Spacer(),
+              const Text('Connected', style: TextStyle(color: Colors.green, fontSize: 12, fontWeight: FontWeight.bold)),
             ],
           ),
-        ).animate().slideY(begin: 1, duration: 400.ms, curve: Curves.easeOut);
-      },
-    );
+          const SizedBox(height: 32),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
+            children: [
+              _metric('BPM', esp32Data?.bpm.toString() ?? '0', const Color(0xFF4CAF50)),
+              _metric('Movement', '${esp32Data?.calculatedMotion.toStringAsFixed(1) ?? '0.0'} m/s²', Colors.blueAccent),
+              _sleepBadge(status),
+            ],
+          ),
+          const SizedBox(height: 24),
+          if (esp32Data != null)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _axisText('AX', esp32Data.ax),
+                const SizedBox(width: 16),
+                _axisText('AY', esp32Data.ay),
+                const SizedBox(width: 16),
+                _axisText('AZ', esp32Data.az),
+              ],
+            ),
+          const SizedBox(height: 24),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.04),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white.withOpacity(0.05)),
+            ),
+            child: Center(
+              child: Text(
+                'AI Prediction: ${status.toUpperCase()} conf: ${(conf * 100).toInt()}%',
+                style: const TextStyle(color: Colors.white60, fontSize: 13, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ),
+        ],
+      ),
+    ).animate().slideY(begin: 1, duration: 600.ms, curve: Curves.easeOutQuart);
   }
 
-  Widget _buildMetric(String label, String value, Color color) {
+  Widget _metric(String label, String val, Color color) {
     return Column(
       children: [
-        Text(label, style: const TextStyle(color: AppColors.textTertiary, fontSize: 10)),
-        const SizedBox(height: 4),
-        Text(value, style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.bold)),
+        Text(label, style: TextStyle(color: Colors.white.withOpacity(0.2), fontSize: 10, letterSpacing: 0.5)),
+        const SizedBox(height: 6),
+        Text(val, style: TextStyle(color: color, fontSize: 26, fontWeight: FontWeight.w800)),
       ],
     );
   }
 
-  Widget _buildSleepStatusBadge() {
-    String label = 'AWAKE';
-    Color color = Colors.green;
-    
-    if (_sleepPrediction != null) {
-      if (_sleepPrediction!.prediction == 'sleep') {
-        if (_sleepPrediction!.confidence >= 0.70) {
-          label = 'DEEP SLEEP';
-          color = Colors.blue;
-        } else {
-          label = 'LIGHT SLEEP';
-          color = Colors.orange;
-        }
-      } else if (_sleepPrediction!.prediction == 'awake') {
-        label = 'AWAKE';
-        color = Colors.green;
-      }
-    } else if (_isApiLoading) {
-      label = 'ANALYZING...';
-      color = Colors.grey;
-    }
-
+  Widget _sleepBadge(String status) {
+    final bool isAwake = status == 'AWAKE';
+    final Color color = isAwake ? Colors.green : Colors.orange;
     return Column(
       children: [
-        const Text('Sleep', style: TextStyle(color: AppColors.textTertiary, fontSize: 10)),
-        const SizedBox(height: 4),
+        Text('Sleep', style: TextStyle(color: Colors.white.withOpacity(0.2), fontSize: 10)),
+        const SizedBox(height: 6),
         Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-          decoration: BoxDecoration(color: color.withOpacity(0.2), borderRadius: BorderRadius.circular(4)),
-          child: Text(label, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold)),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(color: color.withOpacity(0.15), borderRadius: BorderRadius.circular(8), border: Border.all(color: color.withOpacity(0.25))),
+          child: Text(isAwake ? 'AWAKE' : 'SLEEPING', style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.bold)),
         ),
       ],
     );
   }
 
-  Widget _buildAxisData(SensorData data) {
-    if (!data.mpuOk) {
-      return Container(
-        padding: const EdgeInsets.all(8),
-        width: double.infinity,
-        decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(8)),
-        child: const Center(child: Text('[MPU offline]', style: TextStyle(color: Colors.grey, fontSize: 12, fontWeight: FontWeight.bold))),
-      );
-    }
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        _axisLabel('AX', data.ax ?? 0),
-        const SizedBox(width: 16),
-        _axisLabel('AY', data.ay ?? 0),
-        const SizedBox(width: 16),
-        _axisLabel('AZ', data.az ?? 0),
-      ],
-    );
-  }
-
-  Widget _axisLabel(String label, double val) {
-    return Text('$label: ${val.toStringAsFixed(2)}', style: const TextStyle(color: AppColors.textTertiary, fontSize: 11));
-  }
-
-  Widget _buildAiPredictionRow() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(12)),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Text('AI Prediction: ', style: TextStyle(color: AppColors.textSecondary, fontSize: 12)),
-          if (_isApiLoading)
-            const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.primary))
-          else if (_sleepPrediction != null)
-            Text(
-              '${_sleepPrediction!.prediction.toUpperCase()}  conf: ${(_sleepPrediction!.confidence * 100).toInt()}%',
-              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
-            )
-          else
-            const Text('UNKNOWN', style: TextStyle(color: Colors.grey, fontSize: 12)),
-        ],
-      ),
-    );
-  }
-
-  Future<void> _updateSleepPrediction(SensorData data) async {
-    setState(() => _isApiLoading = true);
-    final result = await _sleepApi.predict(motion: data.movement, heartRate: data.heartRate);
-    if (mounted) {
-      setState(() {
-        _sleepPrediction = result;
-        _isApiLoading = false;
-      });
-    }
+  Widget _axisText(String label, double val) {
+    return Text('$label: ${val.toStringAsFixed(2)}', style: const TextStyle(color: Colors.white24, fontSize: 11));
   }
 }
